@@ -196,13 +196,13 @@ class DiffWMAttacker(WMAttacker):
                 img = Image.open(img_path)
                 img = np.asarray(img) / 255
                 img = (img - 0.5) * 2
-                img = torch.tensor(img, dtype=torch.float16, device=self.device).permute(2, 0, 1).unsqueeze(0)
+                img = torch.tensor(img, dtype=self.pipe.vae.dtype, device=self.device).permute(2, 0, 1).unsqueeze(0)
                 latents = self.pipe.vae.encode(img).latent_dist
                 latents = latents.sample(generator) * self.pipe.vae.config.scaling_factor
-                noise = torch.randn([1, 4, img.shape[-2] // 8, img.shape[-1] // 8], device=self.device)
+                noise = torch.randn([1, 4, img.shape[-2] // 8, img.shape[-1] // 8], device=self.device, dtype=self.pipe.vae.dtype)
                 if return_dist:
                     return self.pipe.scheduler.add_noise(latents, noise, timestep, return_dist=True)
-                latents = self.pipe.scheduler.add_noise(latents, noise, timestep).type(torch.half)
+                latents = self.pipe.scheduler.add_noise(latents, noise, timestep)
                 latents_buf.append(latents)
                 outs_buf.append(out_path)
                 prompts_buf.append(prompt)
