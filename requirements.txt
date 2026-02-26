@@ -11,3 +11,4 @@ compressai
 torch_fidelity
 accelerate
 onnxruntime
+scipy

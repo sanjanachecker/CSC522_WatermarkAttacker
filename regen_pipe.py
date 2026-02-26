@@ -9,13 +9,24 @@ logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 
 class ReSDPipeline(StableDiffusionPipeline):
+    """Regeneration Stable Diffusion Pipeline for watermark removal attacks.
+    
+    Extends standard Stable Diffusion to support 'head start' from noisy latents,
+    implementing the constructive process A in equation (1) from the paper.
+    
+    Design rationale: Standard SD pipeline starts from pure noise. This pipeline
+    allows starting from partially noised latents (z_t), enabling the regeneration
+    attack where we add controlled noise to watermarked images then reconstruct.
+    """
     @torch.no_grad()
     def __call__(
             self,
             prompt: Union[str, List[str]],
             prompt1_steps: Optional[int] = None,
             prompt2: Optional[str] = None,
+            # head_start_latents: Pre-noised latents z_t from equation (2) - the destructive output
             head_start_latents: Optional[Union[torch.FloatTensor, list]] = None,
+            # head_start_step: Which timestep to start denoising from (implements partial denoising)
             head_start_step: Optional[int] = None,
             height: Optional[int] = None,
             width: Optional[int] = None,
@@ -117,7 +128,10 @@ class ReSDPipeline(StableDiffusionPipeline):
         # print(timesteps)
 
         # 5. Prepare latent variables
+        # Key modification: Use pre-noised latents from attack instead of random noise
+        # This implements the regeneration attack's constructive process
         if head_start_latents is None:
+            # Standard SD: start from pure noise
             num_channels_latents = self.unet.in_channels
             latents = self.prepare_latents(
                 batch_size * num_images_per_prompt,
@@ -130,6 +144,8 @@ class ReSDPipeline(StableDiffusionPipeline):
                 latents,
             )
         else:
+            # Regeneration attack: start from noisy watermarked image latents z_t
+            # This is the input to the constructive process A in equation (1)
             if type(head_start_latents) == list:
                 latents = head_start_latents[-1]
                 assert len(head_start_latents) == self.scheduler.config.solver_order
@@ -140,10 +156,13 @@ class ReSDPipeline(StableDiffusionPipeline):
         extra_step_kwargs = self.prepare_extra_step_kwargs(generator, eta)
 
         # 7. Denoising loop
+        # This is the reconstruction algorithm A in equation (1)
+        # Denoises z_t back to clean image, removing watermark in the process
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
         with self.progress_bar(total=num_inference_steps) as progress_bar:
             for i, t in enumerate(timesteps):
                 # print((i, t))
+                # head_start_step allows skipping early denoising steps for efficiency
                 if not head_start_step or i >= head_start_step:  # if there is no head start or we reached the hs step
                     # expand the latents if we are doing classifier free guidance
                     # print(latents.shape)
@@ -163,6 +182,8 @@ class ReSDPipeline(StableDiffusionPipeline):
                         noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
 
                         # compute the previous noisy sample x_t -> x_t-1
+                        # This is the core denoising step that reconstructs the image
+                        # while removing the watermark signal destroyed in latent space
                         latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs).prev_sample
 
                 # call the callback, if provided

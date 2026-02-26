@@ -16,6 +16,15 @@ class Watermarker:
 
 
 class InvisibleWatermarker(Watermarker):
+    """Standard invisible watermarking for baseline comparison.
+    
+    Implements traditional watermarking methods (DwtDct, DwtDctSvd, RivaGAN) that
+    serve as baselines in CONTRIBUTIONS.md Step 2. These watermarks have small
+    Lipschitz constants L_x,w, making them vulnerable to the paper's regeneration attack.
+    
+    Design rationale: Used to establish baseline L_x,w ≈ 1 before testing adversarial
+    watermarks with L_adv >> 1 that violate the paper's assumptions.
+    """
     def __init__(self, wm_text, method):
         if method == 'rivaGan':
             WatermarkEncoder.loadModel()
@@ -26,12 +35,23 @@ class InvisibleWatermarker(Watermarker):
         self.decoder = WatermarkDecoder(self.wm_type, len(self.wm_text) * 8)
 
     def encode(self, img_path, output_path):
+        """Apply standard watermark to image.
+        
+        Creates x_w from x with small pixel distance ||x_w - x|| (invisibility constraint Δ).
+        For standard watermarks, latent distance ||φ(x_w) - φ(x)|| remains small,
+        yielding L_x,w ≈ 1 (CONTRIBUTIONS.md baseline measurement).
+        """
         img = cv2.imread(img_path)
         self.encoder.set_watermark(self.wm_type, self.wm_text.encode('utf-8'))
         out = self.encoder.encode(img, self.method)
         cv2.imwrite(output_path, out)
 
     def decode(self, img_path):
+        """Extract watermark from image for detection.
+        
+        Used in CONTEXT.md Phase 3 to measure TPR@FPR=0.01: if watermark is correctly
+        decoded after attack, TPR remains high, proving watermark survived.
+        """
         wm_img = cv2.imread(img_path)
         wm_text_decode = self.decoder.decode(wm_img, self.method)
         return wm_text_decode

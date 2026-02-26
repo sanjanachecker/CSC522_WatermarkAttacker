@@ -17,7 +17,18 @@ class WMAttacker:
 
 
 class VAEWMAttacker(WMAttacker):
+    """Implements Regen-VAE attack from the paper.
+    
+    Uses VAE encoder φ and decoder A to instantiate equation (1): x̂ = A(φ(x_w) + N(0,σ²I_d))
+    The VAE encoder maps images to latent space, noise is added via quality parameter,
+    and decoder reconstructs the image. Lower quality = higher σ (more noise).
+    
+    Design rationale: CompressAI models (Bmshj2018, Cheng2020) provide pre-trained VAE
+    architectures that serve as the embedding function φ and reconstruction algorithm A.
+    """
     def __init__(self, model_name, quality=1, metric='mse', device='cpu'):
+        # Quality parameter controls noise level σ: lower quality = more compression = more noise
+        # This directly implements the destructive process in equation (1)
         if model_name == 'bmshj2018-factorized':
             self.model = bmshj2018_factorized(quality=quality, pretrained=True).eval().to(device)
         elif model_name == 'bmshj2018-hyperprior':
@@ -153,20 +164,44 @@ class CropAttacker(WMAttacker):
 
 
 class DiffWMAttacker(WMAttacker):
+    """Implements Regen-Diffusion attack using Stable Diffusion as described in the paper.
+    
+    Instantiates equation (1) using Stable Diffusion's architecture:
+    - φ(x_w) = √α(t)·E(x_w) where E is VAE encoder (equation 2 from paper)
+    - Noise addition: z_t = φ(x_w) + N(0,(1-α(t))I_d) via forward diffusion
+    - A = Stable Diffusion's denoising process (backward diffusion)
+    
+    Design rationale: noise_step parameter controls timestep t, which determines α(t)
+    and thus the noise level σ². Higher noise_step = more noise = stronger watermark removal
+    but also more image degradation. This is the key trade-off in the paper's CWF guarantee.
+    """
     def __init__(self, pipe, batch_size=20, noise_step=60, captions={}):
         self.pipe = pipe
         self.BATCH_SIZE = batch_size
         self.device = pipe.device
+        # noise_step controls t in equation (2): higher t means more noise added to latent
+        # This directly controls σ² in the paper's impossibility result
         self.noise_step = noise_step
         self.captions = captions
         print(f'Diffuse attack initialized with noise step {self.noise_step} and use prompt {len(self.captions)}')
 
     def attack(self, image_paths, out_paths, return_latents=False, return_dist=False):
+        """Executes the regeneration attack pipeline.
+        
+        Steps implement the paper's attack:
+        1. Encode watermarked image x_w to latent z_0 using VAE encoder (φ)
+        2. Add noise via forward diffusion to timestep t (destructive process)
+        3. Denoise using Stable Diffusion backward process (constructive process A)
+        
+        return_latents: Used for Lipschitz constant measurement (CONTRIBUTIONS.md Step 3)
+        return_dist: Used to measure latent distance ||φ(x_w) - φ(x)|| for L_x,w calculation
+        """
         with torch.no_grad():
             generator = torch.Generator(self.device).manual_seed(1024)
             latents_buf = []
             prompts_buf = []
             outs_buf = []
+            # Timestep t controls noise level in equation (2): z_t = √α(t)E(x_w) + N(0,(1-α(t))I_d)
             timestep = torch.tensor([self.noise_step], dtype=torch.long, device=self.device)
             ret_latents = []
 
@@ -197,21 +232,29 @@ class DiffWMAttacker(WMAttacker):
                 img = np.asarray(img) / 255
                 img = (img - 0.5) * 2
                 img = torch.tensor(img, dtype=self.pipe.vae.dtype, device=self.device).permute(2, 0, 1).unsqueeze(0)
+                # Step 1: Map to latent space using VAE encoder E (the φ function in equation 2)
                 latents = self.pipe.vae.encode(img).latent_dist
                 latents = latents.sample(generator) * self.pipe.vae.config.scaling_factor
+                # Step 2: Add Gaussian noise N(0,σ²I_d) - the destructive process
+                # This is where the watermark signal is destroyed in the latent space
                 noise = torch.randn([1, 4, img.shape[-2] // 8, img.shape[-1] // 8], device=self.device, dtype=self.pipe.vae.dtype)
                 if return_dist:
+                    # Return latent distance for Lipschitz constant calculation (CONTRIBUTIONS.md)
                     return self.pipe.scheduler.add_noise(latents, noise, timestep, return_dist=True)
+                # Apply forward diffusion: z_t = √α(t)·z_0 + √(1-α(t))·ε
                 latents = self.pipe.scheduler.add_noise(latents, noise, timestep)
                 latents_buf.append(latents)
                 outs_buf.append(out_path)
                 prompts_buf.append(prompt)
                 if len(latents_buf) == self.BATCH_SIZE:
+                    # Step 3: Reconstruct image using denoising (the constructive process A)
+                    # Stable Diffusion denoises from z_t back to clean latent, then VAE decodes
                     batched_attack(latents_buf, prompts_buf, outs_buf)
                     latents_buf = []
                     prompts_buf = []
                     outs_buf = []
                 if return_latents:
+                    # Return noisy latents for Lipschitz measurement (CONTRIBUTIONS.md Step 3)
                     ret_latents.append(latents.cpu())
 
             if len(latents_buf) != 0:
