@@ -5,6 +5,7 @@ import os
 from imwatermark import WatermarkEncoder, WatermarkDecoder
 from torchvision import transforms
 import subprocess
+from utils import bytearray_to_bits
 
 
 class Watermarker:
@@ -55,6 +56,19 @@ class InvisibleWatermarker(Watermarker):
         wm_img = cv2.imread(img_path)
         wm_text_decode = self.decoder.decode(wm_img, self.method)
         return wm_text_decode
+
+    def decode_array(self, img_bgr):
+        """Decode watermark from an in-memory BGR uint8 image."""
+        return self.decoder.decode(img_bgr, self.method)
+
+    def bit_accuracy(self, decoded_bytes, k=32):
+        """Compute bit accuracy between decoded watermark and configured message."""
+        bits_decoded = bytearray_to_bits(decoded_bytes)[:k]
+        bits_original = bytearray_to_bits(self.wm_text.encode('utf-8'))[:k]
+        if len(bits_decoded) < k or len(bits_original) < k:
+            return 0.0
+        matches = sum(b1 == b2 for b1, b2 in zip(bits_decoded, bits_original))
+        return matches / k
 
 
 class StableSignatureWatermarker(Watermarker):
